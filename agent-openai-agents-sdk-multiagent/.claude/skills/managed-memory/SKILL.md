@@ -440,7 +440,20 @@ Every path still starts `/memories/` (the API requires it, see Limits) — the l
 
 To turn this on, swap in the layered system prompt and read the distillation rules in **[`memory-layers.md`](memory-layers.md)** (bundled next to this skill) — it defines each layer precisely, the "which layer is this?" decision procedure to run *before* `save_memory`, the path-prefix conventions, and a drop-in `MEMORY_INSTRUCTIONS` that supersedes the one in Step 5. No code changes are needed for semantic/procedural — only the prompt and the paths the model chooses.
 
-### Episodic memory via the Conversations API (Supervisor API path)
+### Episodic memory via the Conversations API (Supervisor API path) — Beta
+
+> **Beta / availability varies — verify on your workspace before relying on it.** The conversation
+> primitives work (`conversations.create` with a `memory_store` + `scope` binding, and
+> `conversations.items.create` / `.list` to append and read back turn state — both tested on staging
+> 2026-07). **But the key step below, `responses.create(conversation=<id>)`, is not yet accepted by every
+> workspace's AI Gateway** — on a staging workspace (`databricks-openai` 0.17.0, `use_ai_gateway=True`) it
+> returned `400 BAD_REQUEST: "conversation: Extra inputs are not permitted"` (both as a top-level arg and in
+> `extra_body`), while a plain `responses.create` with no `conversation` worked. So treat this section as
+> **forward-looking**: the store-backed conversation is created and its items persist, but wiring it into
+> `responses.create` may not be live yet. Confirm with a two-turn recall test (below) on your workspace, and
+> until it passes, fall back to the template's short-term session memory + `/memories/episodic/...` summaries.
+> Note also that conversation state is **separate** from memory-store `entries` — it won't show up in the
+> `.../entries` list API; read it via the conversations/items API.
 
 This applies **only when your agent calls the Supervisor API** (`client.responses.create()` on a Databricks model serving endpoint — see the **supervisor-api** skill), not the in-process OpenAI Agents SDK `Runner.run` or LangGraph `create_agent` loop. A **conversation** is OpenAI-compatible conversation state — the running history of messages and tool calls — backed by a memory store and pinned to one scope. Reuse the same conversation across requests to give the agent memory of earlier turns *across sessions*, persisted in the store you already created.
 
