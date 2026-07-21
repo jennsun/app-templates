@@ -2,7 +2,6 @@ import pytest
 
 from template_config import (
     DEFAULT_GENIE_SPACE_ID,
-    DEFAULT_LAKEBASE,
     DEFAULT_LAKEBASE_AUTOSCALING_ENDPOINT,
     DEFAULT_PROFILE,
     DEFAULT_SERVING_ENDPOINT,
@@ -13,11 +12,6 @@ from template_config import (
 
 def pytest_addoption(parser):
     parser.addoption("--profile", default=DEFAULT_PROFILE, help="Databricks CLI profile")
-    parser.addoption(
-        "--lakebase-provisioned-name",
-        default=DEFAULT_LAKEBASE,
-        help="Lakebase provisioned instance name",
-    )
     parser.addoption(
         "--lakebase-autoscaling-endpoint",
         default=DEFAULT_LAKEBASE_AUTOSCALING_ENDPOINT,
@@ -74,11 +68,6 @@ def pytest_addoption(parser):
 @pytest.fixture
 def profile(request):
     return request.config.getoption("--profile")
-
-
-@pytest.fixture
-def lakebase_provisioned_name(request):
-    return request.config.getoption("--lakebase-provisioned-name")
 
 
 @pytest.fixture
