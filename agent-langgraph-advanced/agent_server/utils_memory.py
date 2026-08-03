@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-from databricks_langchain import AsyncCheckpointSaver, AsyncDatabricksStore
+from databricks_langchain import AsyncCheckpointSaver, AsyncDatabricksStore, DatabricksEmbeddings
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from langgraph.store.base import BaseStore
@@ -41,18 +41,32 @@ class LakebaseConfig:
         return self.autoscaling_endpoint or f"{self.autoscaling_project}/{self.autoscaling_branch}"
 
 
+def neon_database_url() -> Optional[str]:
+    """Return the Neon (plain Postgres) connection string if configured.
+
+    When set, the agent stores short-term and long-term memory in your own
+    Neon Postgres database instead of a Databricks-managed Lakebase instance.
+    Get the connection string from the Neon console (production branch →
+    Connection Details). Use the DIRECT host, not the -pooler host, so
+    LangGraph can run DDL and prepared statements.
+    """
+    return os.getenv("NEON_DATABASE_URL") or None
+
+
 def init_lakebase_config() -> LakebaseConfig:
     endpoint = os.getenv("LAKEBASE_AUTOSCALING_ENDPOINT") or None
     project = os.getenv("LAKEBASE_AUTOSCALING_PROJECT") or None
     branch = os.getenv("LAKEBASE_AUTOSCALING_BRANCH") or None
 
     has_autoscaling = project and branch
-    if not endpoint and not has_autoscaling:
+    # Neon is an alternative backend — skip the Lakebase requirement when it's set.
+    if not endpoint and not has_autoscaling and not neon_database_url():
         raise ValueError(
             "Lakebase configuration is required but not set. "
             "Please set one of the following in your environment:\n"
             "  Option 1 (autoscaling endpoint): LAKEBASE_AUTOSCALING_ENDPOINT=<your-endpoint-name>\n"
             "  Option 2 (autoscaling): LAKEBASE_AUTOSCALING_PROJECT=<project> and LAKEBASE_AUTOSCALING_BRANCH=<branch>\n"
+            "  Option 3 (Neon Postgres): NEON_DATABASE_URL=<your-neon-connection-string>\n"
         )
 
     # Priority: endpoint > project+branch (mutually exclusive in the library)
@@ -91,7 +105,15 @@ def get_user_id(request: ResponsesAgentRequest) -> Optional[str]:
 
 
 def get_lakebase_access_error_message(lakebase_description: str) -> str:
-    """Generate a helpful error message for Lakebase access issues."""
+    """Generate a helpful error message for memory-store connection issues."""
+    if neon_database_url():
+        return (
+            "Failed to connect to the Neon Postgres database. Please verify:\n"
+            "1. NEON_DATABASE_URL is correct and uses the DIRECT host (not the -pooler host)\n"
+            "2. The connection string includes '?sslmode=require'\n"
+            "3. The Neon project/branch is active and reachable from this environment\n"
+            "4. The role has permission to create tables and the 'vector' extension"
+        )
     if _is_databricks_app_env():
         app_name = os.getenv("DATABRICKS_APP_NAME")
         return (
@@ -115,8 +137,44 @@ def get_lakebase_access_error_message(lakebase_description: str) -> str:
 
 
 @asynccontextmanager
+async def neon_context(config: LakebaseConfig, database_url: str):
+    """Yield (checkpointer, store) backed by a Neon (plain Postgres) database.
+
+    Uses LangGraph's native Postgres backends instead of the Databricks-managed
+    Lakebase classes, since Neon authenticates with a connection string rather
+    than a Databricks WorkspaceClient. Long-term memory keeps semantic search by
+    storing pgvector embeddings computed via the Databricks embedding endpoint.
+    Requires the `vector` extension (CREATE EXTENSION IF NOT EXISTS vector;),
+    which store.setup() creates automatically when an index is configured.
+    """
+    # Imported lazily so the Lakebase path never requires these packages.
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+    from langgraph.store.postgres.aio import AsyncPostgresStore
+
+    index = {
+        "dims": config.embedding_dims,
+        "embed": DatabricksEmbeddings(endpoint=config.embedding_endpoint),
+        "fields": ["$"],  # embed the whole memory value, matching AsyncDatabricksStore
+    }
+    async with AsyncPostgresSaver.from_conn_string(database_url) as checkpointer, (
+        AsyncPostgresStore.from_conn_string(database_url, index=index)
+    ) as store:
+        yield checkpointer, store
+
+
+@asynccontextmanager
 async def lakebase_context(config: LakebaseConfig):
-    """Yield (checkpointer, store) for short-term and long-term memory."""
+    """Yield (checkpointer, store) for short-term and long-term memory.
+
+    Dispatches to Neon when NEON_DATABASE_URL is set, otherwise uses the
+    Databricks-managed Lakebase backends.
+    """
+    database_url = neon_database_url()
+    if database_url:
+        async with neon_context(config, database_url) as resources:
+            yield resources
+        return
+
     async with AsyncCheckpointSaver(
         autoscaling_endpoint=config.autoscaling_endpoint,
         project=config.autoscaling_project,
