@@ -1,0 +1,84 @@
+# Databricks Asset Bundle definition for the Experian DSPy memory agent.
+#
+# Two targets:
+#   staging (default) — the pre-existing `agent-experian-test` app in the
+#     eng-ml-inference staging workspace (bound once via
+#     `databricks bundle deployment bind experian_memory_app agent-experian-test -p eng-ml-inference`).
+#   ca-central — `agent-experian-dspy` in eng-ml-inference-team-ca-central-1.
+#
+#   databricks bundle deploy [-t <target>] -p <profile>
+#   databricks bundle run experian_memory_app [-t <target>] -p <profile>
+#
+# Runtime command + env live in app.yaml; env values resolve through the
+# per-target app resources below (serving endpoints + the memory-API PAT).
+
+bundle:
+  name: agent_experian_memory
+
+# The Apps build installs from requirements.txt (exported from uv.lock via
+# `uv export --no-hashes --no-emit-project -o requirements.txt`). The uv.lock
+# route fails: the builder's older uv rejects the revision-3 lockfile with
+# "lockfile needs to be updated, but --locked was provided".
+
+targets:
+  staging:
+    mode: production
+    default: true
+    workspace:
+      host: https://eng-ml-inference.staging.cloud.databricks.com
+      root_path: /Workspace/Users/jenny.sun@databricks.com/.bundle/agent_experian_memory/staging
+    resources:
+      apps:
+        experian_memory_app:
+          name: "agent-experian-test"
+          description: "Experian DSPy pipeline on the session + memory APIs (bug bash)"
+          source_code_path: ./
+          # Matches the policy already assigned to the pre-existing app; without
+          # this, terraform errors with "budget_policy_id: was null, but now ..."
+          budget_policy_id: "37128213-763a-3007-b1f8-ce0c66ae827a"
+          resources:
+            - name: 'answer-generator-llm'
+              serving_endpoint:
+                name: 'databricks-gemini-3-1-flash-lite'
+                permission: 'CAN_QUERY'
+            - name: 'task-llm'
+              serving_endpoint:
+                name: 'databricks-gemini-3-flash'
+                permission: 'CAN_QUERY'
+            - name: 'memory-api-token'
+              secret:
+                scope: 'jenny-bugbash'
+                key: 'memory-api-pat'
+                permission: 'READ'
+
+  ca-central:
+    mode: production
+    workspace:
+      host: https://eng-ml-inference-team-ca-central-1.cloud.databricks.com
+      root_path: /Workspace/Users/jenny.sun@databricks.com/.bundle/agent_experian_memory/ca-central
+    resources:
+      apps:
+        experian_memory_app:
+          name: "agent-experian-dspy"
+          description: "Experian DSPy pipeline on the session + memory APIs"
+          source_code_path: ./
+          # This workspace requires a git repository on app creation
+          # (apps-v2 git-first policy); deployments still snapshot the
+          # bundle-synced workspace files.
+          git_repository:
+            provider: gitHub
+            url: https://github.com/jennsun/app-templates
+          resources:
+            - name: 'answer-generator-llm'
+              serving_endpoint:
+                name: 'databricks-gemini-3-5-flash-lite'
+                permission: 'CAN_QUERY'
+            - name: 'task-llm'
+              serving_endpoint:
+                name: 'databricks-gemini-3-5-flash'
+                permission: 'CAN_QUERY'
+            - name: 'memory-api-token'
+              secret:
+                scope: 'experian-dspy'
+                key: 'memory-api-pat'
+                permission: 'READ'

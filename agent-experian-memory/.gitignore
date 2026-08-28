@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+backend.log
+.databricks/
+# Re-include files the repo root .gitignore excludes: the Apps builder needs
+# the lockfile and python pin in the bundle upload to install the environment.
+!uv.lock
+!.python-version

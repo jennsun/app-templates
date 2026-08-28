@@ -1,0 +1,32 @@
+# uv project config for the Experian memory-API bug-bash agent.
+#
+# This is a slimmed copy of agent-access-bot: same DSPy deterministic pipeline
+# shape, but without the Experian-private packages (arabica-client,
+# ecs-mlflow-tracing), Ascend gateway, Presidio PII redaction, and vector
+# search — none of those resources exist in the eng-ml-inference staging
+# workspace. In their place, the new Databricks session-store and memory-store
+# APIs (/api/agents/v1) provide conversation history and long-term memory via
+# the vendored databricks_agent_client package.
+
+[project]
+name = "agent-experian-memory"
+version = "0.1.0"
+description = "Experian DSPy agent refactored onto the Databricks session + memory APIs (bug bash)"
+# >=3.11: the Apps builder pip-installs requirements.txt on Python 3.11
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "mlflow-skinny>=3.9",
+    "mlflow-tracing>=3.9",
+    "dspy==3.1.3",
+    "databricks-sdk>=0.80.0",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+    "python-dotenv>=1.0.0",
+    "httpx>=0.27",
+    "pandas>=2.2",  # required by mlflow.pyfunc (ResponsesAgent base class)
+]
+
+[tool.uv]
+package = false

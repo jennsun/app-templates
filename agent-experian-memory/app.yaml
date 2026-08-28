@@ -1,0 +1,44 @@
+# Databricks Apps runtime config for the Experian DSPy memory agent.
+#
+# DATABRICKS_HOST / DATABRICKS_CLIENT_ID / DATABRICKS_CLIENT_SECRET are NOT set
+# here: Databricks Apps injects them for the app's service principal; the LLM
+# calls (litellm via databricks-sdk auth) authenticate through that chain.
+#
+# Model + token env vars use valueFrom resource references, so per-workspace
+# values (endpoint names, secret scope) come from the databricks.yml target:
+#   - staging (agent-experian-test):  gemini-3-flash / gemini-3-1-flash-lite,
+#     secret jenny-bugbash/memory-api-pat
+#   - ca-central (agent-experian-dspy): gemini-3-5-flash / gemini-3-5-flash-lite,
+#     secret experian-dspy/memory-api-pat
+#
+# MEMORY_API_TOKEN is a user PAT for the /api/agents session+memory APIs —
+# no app identity works today:
+#  - SP with a USER-type Lakebase role -> PG "OAuth: User is not authorized";
+#    with a SERVICE_PRINCIPAL-type role -> the service rejects it ("must be a
+#    USER role with LAKEBASE_OAUTH_V1"). Catch-22 until the backend accepts
+#    SERVICE_PRINCIPAL roles.
+#  - OBO is out: /api/agents demands the all-apis scope, which forwarded app
+#    user tokens can't carry.
+
+# The builder pip-installs requirements.txt into the app environment; run
+# with that python directly (the uv.lock path is rejected by the builder's
+# older uv — see databricks.yml).
+command: ["python", "main.py"]
+
+env:
+  - name: MEMORY_API_TOKEN
+    valueFrom: "memory-api-token"
+  - name: SESSION_STORE_NAME
+    value: "experian-dspy-sessions"
+  - name: SESSION_STORE_TRAFFIC_ID
+    value: ""
+  - name: MEMORY_STORE_DISPLAY_NAME
+    value: "experian-dspy-memory"
+  - name: MEMORY_STORE_TRAFFIC_ID
+    value: ""
+  - name: QUERY_REWRITER_MODEL
+    valueFrom: "task-llm"
+  - name: ANSWER_GENERATOR_MODEL
+    valueFrom: "answer-generator-llm"
+  - name: MEMORY_EXTRACTOR_MODEL
+    valueFrom: "answer-generator-llm"
