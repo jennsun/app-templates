@@ -25,6 +25,7 @@ kept in a ring buffer (RECENT_TURNS) that the debug UI reads via /debug/traces.
 
 import json
 import logging
+import re
 import threading
 import time
 from collections import deque
@@ -48,6 +49,70 @@ logger = logging.getLogger(__name__)
 # Ring buffer of recent turn records for the debug UI (/debug/traces).
 RECENT_TURNS: deque = deque(maxlen=30)
 _RECENT_TURNS_LOCK = threading.Lock()
+
+# Rolling per-endpoint latency samples for the debug UI (/debug/latency).
+# Keyed by (api, method, normalized path) so every call to the same logical
+# endpoint aggregates together regardless of store/session/entry ids.
+_API_LATENCY: dict[tuple[str, str, str], dict] = {}
+_API_LATENCY_LOCK = threading.Lock()
+_LATENCY_SAMPLES_PER_ENDPOINT = 500
+
+_UUID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE
+)
+
+
+def _normalize_api_path(path: str) -> str:
+    """Collapse ids so /debug/latency groups calls by logical endpoint."""
+    path = re.sub(r"(session-stores/)[^/:]+", r"\1{store}", path)
+    path = re.sub(r"(sessions/)[^/:]+", r"\1{session_id}", path)
+    path = re.sub(r"(memory-stores/)[^/:]+", r"\1{store_id}", path)
+    path = re.sub(r"(entries/)[^/:]+", r"\1{entry_id}", path)
+    return _UUID_RE.sub("{id}", path)
+
+
+def _record_latency(api: str, method, path, duration_ms: float, error: str | None) -> None:
+    key = (api, str(method), _normalize_api_path(str(path)))
+    with _API_LATENCY_LOCK:
+        rec = _API_LATENCY.get(key)
+        if rec is None:
+            rec = {"samples": deque(maxlen=_LATENCY_SAMPLES_PER_ENDPOINT), "count": 0, "errors": 0}
+            _API_LATENCY[key] = rec
+        rec["count"] += 1
+        if error:
+            rec["errors"] += 1
+        rec["samples"].append(duration_ms)
+
+
+def latency_summary() -> list[dict]:
+    """Aggregated latency per (api, method, endpoint), sorted by call count."""
+    with _API_LATENCY_LOCK:
+        snapshot = [
+            (key, rec["count"], rec["errors"], list(rec["samples"]))
+            for key, rec in _API_LATENCY.items()
+        ]
+    rows = []
+    for (api, method, path), count, errors, samples in snapshot:
+        ordered = sorted(samples)
+        pct = lambda p: ordered[min(len(ordered) - 1, int(round(p * (len(ordered) - 1))))]
+        rows.append(
+            {
+                "api": api,
+                "method": method,
+                "path": path,
+                "count": count,
+                "errors": errors,
+                "avg_ms": round(sum(ordered) / len(ordered), 1),
+                "p50_ms": round(pct(0.50), 1),
+                "p95_ms": round(pct(0.95), 1),
+                "min_ms": round(ordered[0], 1),
+                "max_ms": round(ordered[-1], 1),
+                "last_ms": round(samples[-1], 1),
+                "window": len(ordered),
+            }
+        )
+    rows.sort(key=lambda r: (-r["count"], r["api"], r["path"]))
+    return rows
 
 
 def _clip(obj, limit: int = 6000):
@@ -149,16 +214,20 @@ def build_agent_client(
             error = f"{type(e).__name__}: {e}"
             raise
         finally:
+            duration_ms = (time.perf_counter() - t0) * 1000
+            method = kwargs.get("method", args[0] if args else "?")
+            call_path = kwargs.get("path", args[1] if len(args) > 1 else "?")
+            _record_latency(api_label, method, call_path, duration_ms, error)
             if trace is not None:
                 trace.record(
                     api=api_label,
-                    method=kwargs.get("method", args[0] if args else "?"),
-                    path=kwargs.get("path", args[1] if len(args) > 1 else "?"),
+                    method=method,
+                    path=call_path,
                     query=kwargs.get("query"),
                     body=kwargs.get("body"),
                     response=response,
                     error=error,
-                    duration_ms=(time.perf_counter() - t0) * 1000,
+                    duration_ms=duration_ms,
                     traffic_id=traffic_id,
                 )
 

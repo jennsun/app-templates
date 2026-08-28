@@ -84,6 +84,11 @@
         <button id="refreshTrace" title="Re-fetch /debug/traces">↻ refresh</button></h2>
       <div class="scroll" id="trace"><div class="empty">Send a message — every session-store and memory-store REST call made before and after the turn shows up here.</div></div>
     </section>
+    <section class="panel" style="flex: 0 1 auto;">
+      <h2>Latency — session/memory API endpoints
+        <button id="refreshLatency" title="Re-fetch /debug/latency">↻ refresh</button></h2>
+      <div class="scroll" id="latency" style="max-height: 220px;"><div class="empty">No API calls recorded yet this process — send a message or use the explorer.</div></div>
+    </section>
     <section class="panel">
       <h2>API explorer — trigger the APIs directly</h2>
       <div class="toolbar">
@@ -111,16 +116,17 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const pretty = (o) => { try { return JSON.stringify(o, null, 2); } catch { return String(o); } };
 
-// Lakebase UI pages for the backing store databases (staging workspace)
-const WS = 'https://eng-ml-inference.staging.cloud.databricks.com';
-const SESSION_STORE_URL = `${WS}/lakebase/projects/3401b6a1-2c9a-414f-97a9-357d067c635a/branches/br-rapid-block-y2zvogoi/tables?o=1653573648247579`;
-const MEMORY_STORE_URL = `${WS}/lakebase/projects/cddd2beb-84e6-46ac-af3f-b66f6a53d7db/branches/br-frosty-frog-y282kcm6/tables?o=1653573648247579`;
+// Lakebase UI links for the backing store databases come from /debug/config —
+// the server resolves the internal project/branch in ITS OWN workspace, so
+// the same UI works on staging and ca-central deployments.
+const storeLabel = (name, url, extra) => url
+  ? `<a href="${esc(url)}" target="_blank" rel="noopener" title="Open the backing Lakebase database (pick database ${esc(name)})">${esc(name)} ↗</a>${extra}`
+  : `${esc(name)}${extra}`;
 
 fetch('debug/config').then(r => r.json()).then(c => {
   $('cfg').innerHTML =
-    `session store: <a href="${SESSION_STORE_URL}" target="_blank" rel="noopener" title="Open the backing Lakebase database (pick database ${esc(c.session_store)})">${esc(c.session_store)} ↗</a>` +
-    (c.session_store_traffic_id ? ` (→ ${esc(c.session_store_traffic_id)})` : '') +
-    ` &nbsp;·&nbsp; memory store: <a href="${MEMORY_STORE_URL}" target="_blank" rel="noopener" title="Open the backing Lakebase database">${esc(c.memory_store)} ↗</a>`;
+    `session store: ${storeLabel(c.session_store, c.session_store_url, c.session_store_traffic_id ? ` (→ ${esc(c.session_store_traffic_id)})` : '')}` +
+    ` &nbsp;·&nbsp; memory store: ${storeLabel(c.memory_store, c.memory_store_url, '')}`;
 }).catch(() => { $('cfg').textContent = 'config unavailable'; });
 
 function renderCall(c) {
@@ -158,6 +164,30 @@ async function loadTraces(highlightTurnId) {
   }).join('<hr style="border:none;border-top:1px solid var(--border)">');
 }
 $('refreshTrace').onclick = () => loadTraces();
+
+async function loadLatency() {
+  const r = await fetch('debug/latency');
+  const { endpoints } = await r.json();
+  if (!endpoints.length) return;
+  const cell = (v) => `<td style="padding:3px 8px;text-align:right;white-space:nowrap">${v}</td>`;
+  const rows = endpoints.map(e =>
+    `<tr style="border-top:1px solid var(--border)">` +
+    `<td style="padding:3px 8px"><span class="chip" style="background:${e.api === 'session-store' ? '#0969da' : '#bf3989'}">${esc(e.api)}</span></td>` +
+    `<td style="padding:3px 8px;font-family:var(--mono);white-space:nowrap"><b>${esc(e.method)}</b> ${esc(e.path)}</td>` +
+    cell(e.count) +
+    cell(e.errors ? `<span style="color:var(--err)">${e.errors}</span>` : '0') +
+    cell(e.avg_ms) + cell(e.p50_ms) + cell(e.p95_ms) + cell(e.max_ms) + cell(e.last_ms) +
+    `</tr>`).join('');
+  const th = (t) => `<th style="padding:3px 8px;text-align:right;white-space:nowrap">${t}</th>`;
+  $('latency').innerHTML =
+    `<table style="border-collapse:collapse;font-size:11.5px;width:100%">` +
+    `<thead><tr style="color:var(--muted);text-transform:uppercase;font-size:10px">` +
+    `<th style="padding:3px 8px;text-align:left">api</th><th style="padding:3px 8px;text-align:left">endpoint</th>` +
+    th('calls') + th('errs') + th('avg ms') + th('p50') + th('p95') + th('max') + th('last') +
+    `</tr></thead><tbody>${rows}</tbody></table>`;
+}
+$('refreshLatency').onclick = () => loadLatency();
+loadLatency();
 
 $('newSession').onclick = () => { $('session').value = ''; addMsg('bot', 'Started a new session — history resets, long-term memory persists.'); };
 
@@ -213,6 +243,7 @@ async function send() {
       meta.textContent = `session ${done_outputs.session_id} · recalled ${done_outputs.long_term_memories_recalled.length} · extracted ${done_outputs.memories_extracted.length} · wrote ${(done_outputs.memories_written || []).length}`;
       bot.appendChild(meta);
       await loadTraces(done_outputs.debug_turn_id);
+      await loadLatency();
     }
   } catch (e) {
     bot.className = 'msg err'; bot.textContent = String(e);

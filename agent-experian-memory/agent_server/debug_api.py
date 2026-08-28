@@ -15,6 +15,8 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from databricks.sdk import WorkspaceClient
+
 from databricks_agent_client.memory_store import MemoryStoreClient
 from databricks_agent_client.session_store import SessionStoreClient
 from experian_agent.memory import (
@@ -22,13 +24,62 @@ from experian_agent.memory import (
     TurnMemoryManager,
     TurnTrace,
     build_agent_client,
+    latency_summary,
 )
 
 logger = logging.getLogger(__name__)
 
 
+def _resolve_lakebase_links(config) -> dict:
+    """Lakebase UI URLs for the internal projects backing the session/memory
+    stores, resolved against THIS workspace (the projects/branches differ per
+    workspace, so nothing can be hardcoded in the UI).
+
+    Uses the same identity as the store clients (MEMORY_API_TOKEN if set).
+    Returns {} if anything fails — the UI then renders plain store names.
+    """
+    try:
+        if config.memory_api_token:
+            ws = WorkspaceClient(token=config.memory_api_token, auth_type="pat")
+        else:
+            ws = WorkspaceClient()
+        host = ws.config.host.rstrip("/")
+        workspace_id = ws.get_workspace_id()
+        projects = ws.api_client.do(
+            method="GET", path="/api/2.0/postgres/projects", query={"page_size": 100}
+        ).get("projects", [])
+
+        links = {}
+        for label, marker in (
+            ("session_store_url", "agent-session-store"),
+            ("memory_store_url", "agent-memory-store"),
+        ):
+            project = next((p for p in projects if marker in p.get("name", "")), None)
+            if project is None:
+                continue
+            branches = ws.api_client.do(
+                method="GET", path=f"/api/2.0/postgres/{project['name']}/branches"
+            ).get("branches", [])
+            branch = next(
+                (b for b in branches if b.get("name", "").endswith("/production")),
+                branches[0] if branches else None,
+            )
+            if branch is None:
+                continue
+            branch_id = branch.get("uid") or branch["name"].rsplit("/", 1)[-1]
+            links[label] = (
+                f"{host}/lakebase/projects/{project['uid']}/branches/{branch_id}"
+                f"/tables?o={workspace_id}"
+            )
+        return links
+    except Exception:
+        logger.exception("failed to resolve Lakebase links for the debug UI")
+        return {}
+
+
 def register_debug_routes(app: FastAPI, memory_manager: TurnMemoryManager) -> None:
     config = memory_manager.config
+    lakebase_links: dict = {}
 
     def _json(payload, status: int = 200) -> JSONResponse:
         return JSONResponse(payload, status_code=status)
@@ -68,9 +119,13 @@ def register_debug_routes(app: FastAPI, memory_manager: TurnMemoryManager) -> No
 
     # ------------------------------------------------------------------
     def get_config() -> JSONResponse:
+        if not lakebase_links:
+            lakebase_links.update(_resolve_lakebase_links(config))
         return _json(
             {
                 "session_store": config.session_store_name,
+                "session_store_url": lakebase_links.get("session_store_url"),
+                "memory_store_url": lakebase_links.get("memory_store_url"),
                 "session_store_traffic_id": config.session_store_traffic_id or None,
                 "memory_store": config.memory_store_display_name,
                 "memory_store_traffic_id": config.memory_store_traffic_id or None,
@@ -86,6 +141,10 @@ def register_debug_routes(app: FastAPI, memory_manager: TurnMemoryManager) -> No
 
     def get_traces() -> JSONResponse:
         return _json({"turns": list(RECENT_TURNS)})
+
+    def get_latency() -> JSONResponse:
+        """Aggregated latency per session/memory API endpoint (rolling window)."""
+        return _json({"endpoints": latency_summary()})
 
     # ------------------------------------------------------------------
     async def list_sessions(request: Request) -> JSONResponse:
@@ -204,6 +263,7 @@ def register_debug_routes(app: FastAPI, memory_manager: TurnMemoryManager) -> No
     # ------------------------------------------------------------------
     app.add_api_route("/debug/config", get_config, methods=["GET"])
     app.add_api_route("/debug/traces", get_traces, methods=["GET"])
+    app.add_api_route("/debug/latency", get_latency, methods=["GET"])
     app.add_api_route("/debug/sessions", list_sessions, methods=["GET"])
     app.add_api_route("/debug/session-items", list_session_items, methods=["GET"])
     app.add_api_route("/debug/session-append", append_session_item, methods=["POST"])
