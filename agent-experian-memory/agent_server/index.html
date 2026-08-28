@@ -84,11 +84,6 @@
         <button id="refreshTrace" title="Re-fetch /debug/traces">↻ refresh</button></h2>
       <div class="scroll" id="trace"><div class="empty">Send a message — every session-store and memory-store REST call made before and after the turn shows up here.</div></div>
     </section>
-    <section class="panel" style="flex: 0 1 auto;">
-      <h2>Latency — session/memory API endpoints
-        <button id="refreshLatency" title="Re-fetch /debug/latency">↻ refresh</button></h2>
-      <div class="scroll" id="latency" style="max-height: 220px;"><div class="empty">No API calls recorded yet this process — send a message or use the explorer.</div></div>
-    </section>
     <section class="panel">
       <h2>API explorer — trigger the APIs directly</h2>
       <div class="toolbar">
@@ -140,6 +135,7 @@ function renderCall(c) {
     `<span class="chip" style="background:${c.api === 'session-store' ? '#0969da' : '#bf3989'}">${esc(c.api)}</span>` +
     `<span class="m">${esc(c.method)}</span><span class="p" title="${esc(c.path)}">${esc(c.path)}</span>` +
     (c.error ? `<span class="ms">✗</span>` : '') +
+    `<span class="ms" title="request latency">${c.duration_ms != null ? Math.round(c.duration_ms) + ' ms' : ''}</span>` +
     `</summary><pre>${esc(sections.join('\n\n'))}</pre></details>`;
 }
 
@@ -157,37 +153,14 @@ async function loadTraces(highlightTurnId) {
   if (!turns.length) return;
   $('trace').innerHTML = turns.slice(0, 5).map((t, i) => {
     const open = i === 0;
-    const hdr = `<div class="turnhdr">turn ${esc(t.turn_id)} · ${esc(t.status)} · session ${esc(t.session_id)} · ${t.api_calls.length} API calls</div>`;
+    const apiMs = Math.round(t.api_calls.reduce((s, c) => s + (c.duration_ms || 0), 0));
+    const hdr = `<div class="turnhdr">turn ${esc(t.turn_id)} · ${esc(t.status)} · session ${esc(t.session_id)} · ${t.api_calls.length} API calls · ${apiMs} ms total API time</div>`;
     const q = `<div class="facts"><b>user</b> ${esc(t.query || '')}</div>`;
     const calls = t.api_calls.map(renderCall).join('');
     return `<details ${open ? 'open' : ''}><summary style="cursor:pointer;font-size:12.5px;font-weight:600">${new Date(t.time).toLocaleTimeString()} — ${esc((t.query || '').slice(0, 60))}</summary>${hdr}${q}${factsBlock(t)}${calls}</details>`;
   }).join('<hr style="border:none;border-top:1px solid var(--border)">');
 }
 $('refreshTrace').onclick = () => loadTraces();
-
-async function loadLatency() {
-  const r = await fetch('debug/latency');
-  const { endpoints } = await r.json();
-  if (!endpoints.length) return;
-  const cell = (v) => `<td style="padding:3px 8px;text-align:right;white-space:nowrap">${v}</td>`;
-  const rows = endpoints.map(e =>
-    `<tr style="border-top:1px solid var(--border)">` +
-    `<td style="padding:3px 8px"><span class="chip" style="background:${e.api === 'session-store' ? '#0969da' : '#bf3989'}">${esc(e.api)}</span></td>` +
-    `<td style="padding:3px 8px;font-family:var(--mono);white-space:nowrap"><b>${esc(e.method)}</b> ${esc(e.path)}</td>` +
-    cell(e.count) +
-    cell(e.errors ? `<span style="color:var(--err)">${e.errors}</span>` : '0') +
-    cell(e.avg_ms) + cell(e.p50_ms) + cell(e.p95_ms) + cell(e.max_ms) + cell(e.last_ms) +
-    `</tr>`).join('');
-  const th = (t) => `<th style="padding:3px 8px;text-align:right;white-space:nowrap">${t}</th>`;
-  $('latency').innerHTML =
-    `<table style="border-collapse:collapse;font-size:11.5px;width:100%">` +
-    `<thead><tr style="color:var(--muted);text-transform:uppercase;font-size:10px">` +
-    `<th style="padding:3px 8px;text-align:left">api</th><th style="padding:3px 8px;text-align:left">endpoint</th>` +
-    th('calls') + th('errs') + th('avg ms') + th('p50') + th('p95') + th('max') + th('last') +
-    `</tr></thead><tbody>${rows}</tbody></table>`;
-}
-$('refreshLatency').onclick = () => loadLatency();
-loadLatency();
 
 $('newSession').onclick = () => { $('session').value = ''; addMsg('bot', 'Started a new session — history resets, long-term memory persists.'); };
 
@@ -243,7 +216,6 @@ async function send() {
       meta.textContent = `session ${done_outputs.session_id} · recalled ${done_outputs.long_term_memories_recalled.length} · extracted ${done_outputs.memories_extracted.length} · wrote ${(done_outputs.memories_written || []).length}`;
       bot.appendChild(meta);
       await loadTraces(done_outputs.debug_turn_id);
-      await loadLatency();
     }
   } catch (e) {
     bot.className = 'msg err'; bot.textContent = String(e);
