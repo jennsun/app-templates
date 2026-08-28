@@ -1,9 +1,15 @@
 # agent-experian-memory
 
 Experian's access-bot DSPy pipeline refactored onto the new Databricks
-**session store** and **memory store** APIs (`/api/agents/v1`) — built for the
-memory-API bug bash. Deployed over the `agent-experian-test` app in the
-eng-ml-inference staging workspace.
+**session store** and **memory store** APIs (`/api/agents/v1`), integrated via
+the `databricks_agent_client` SDK the way the
+`databricks_agent_client_dspy_demo` notebook demonstrates (a single
+`DatabricksAgentClient` facade over both stores). Deployed twice:
+
+| Target | App | Workspace |
+|---|---|---|
+| `staging` (default) | `agent-experian-test` | eng-ml-inference (staging) |
+| `ca-central` | `agent-experian-dspy` | eng-ml-inference-team-ca-central-1 |
 
 ## What changed vs. Experian's app
 
@@ -38,13 +44,17 @@ reranker, so those access-bot stages are stubbed/omitted.
 
 ## Stores & routing
 
+Both workspaces use same-named stores (created 2026-08-28; the original
+`experian-bugbash-*` stores' backing databases went bad server-side):
+
 | Surface | Store | Routing |
 |---|---|---|
-| Session store | `experian-bugbash-sessions` | liteswap: `x-databricks-traffic-id: testenv://liteswap/test-shaotong` |
-| Memory store | `experian-bugbash-memory` | normal staging gateway |
+| Session store | `experian-dspy-sessions` | normal gateway (set `SESSION_STORE_TRAFFIC_ID` for liteswap) |
+| Memory store | `experian-dspy-memory` | normal gateway |
 
-The vendored `databricks_agent_client/` package (from the bug-bash notebooks)
-wraps both APIs.
+The vendored `databricks_agent_client/` package (synced from
+`/Users/shaotong.li@databricks.com/Custom Agent Platform/databricks_agent_client`
+in staging) wraps both APIs behind the `DatabricksAgentClient` facade.
 
 ## Debug console (the app landing page)
 
@@ -68,9 +78,11 @@ Backing endpoints (also curl-able): `GET /debug/traces`, `GET /debug/config`,
 ## Auth (important bug-bash caveat)
 
 **No app identity can call the session/memory APIs today**, so the deployed
-app uses a 7-day user PAT from secret scope `jenny-bugbash/memory-api-pat`
-(env `MEMORY_API_TOKEN`). Locally, the databricks-sdk profile is used (`.env`
-sets `DATABRICKS_CONFIG_PROFILE=eng-ml-inference`). Specifics:
+apps use a user PAT injected via a secret app resource (env `MEMORY_API_TOKEN`,
+`valueFrom: memory-api-token`): staging reads `jenny-bugbash/memory-api-pat`,
+ca-central reads `experian-dspy/memory-api-pat` (30-day PAT created
+2026-08-28). Locally, the databricks-sdk profile is used (`.env` sets
+`DATABRICKS_CONFIG_PROFILE=eng-ml-inference`). Specifics:
 
 - **Service principal**: even with CAN_MANAGE on the backing internal Lakebase
   projects (`databricks-internal-lakebase-agent-{session,memory}-store`), a PG
@@ -95,8 +107,18 @@ curl -X POST localhost:8000/invocations -H "Content-Type: application/json" -d '
 ## Deploy
 
 ```bash
+# staging (default target) — snapshot deploy from the bundle-synced files
 databricks bundle deploy -p eng-ml-inference
 databricks bundle run experian_memory_app -p eng-ml-inference
+
+# ca-central — the workspace only accepts GIT-BASED deployments:
+# `bundle deploy` creates/updates the app + resources, but the deployment
+# itself must reference a git branch of the repo configured on the app
+# (github.com/jennsun/app-templates, branch experian-dspy-app). After pushing:
+databricks bundle deploy -t ca-central -p eng-ml-inference-team-ca-central-1
+databricks api post /api/2.0/apps/agent-experian-dspy/deployments \
+  -p eng-ml-inference-team-ca-central-1 \
+  --json '{"git_source":{"branch":"experian-dspy-app","source_code_path":"agent-experian-memory"},"mode":"SNAPSHOT"}'
 ```
 
 The Apps build installs from `requirements.txt` (regenerate after dependency
